@@ -1,5 +1,7 @@
 # Docker Garbage Collector
 
+![Logo](docker-GC.png)
+
 ## Introduction
 
 Docker is cool, but the way it manage container images has a side effect : after you destroyed a container, the image it has been built on
