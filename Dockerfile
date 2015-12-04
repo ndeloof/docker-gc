@@ -1,3 +1,5 @@
-FROM go:1.5-onbuild
+FROM scratch
 
-ENTRYPOINT ["app"]
+COPY /docker-gc /docker-gc
+
+ENTRYPOINT ["/docker-gc"]
