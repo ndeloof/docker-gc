@@ -23,3 +23,4 @@ week-end. You can override with `--maxAge [duration]` using Golang duration synt
 For your convenience, docker-gc is also available as a docker image. You can run it as `docker run -d -v /var/run/docker.sock:/var/run/docker.sock ndeloof/docker-gc`
 You need to bind mount `/var/run/docker.sock` from docker host so the docker-gc process can attach to the daemon to listen for event and inspect/remove images.
 
+You can also use `docker-gc.service` to deploy Docker-gc everywhere using [Fleet](https://coreos.com/fleet/docs/latest/) on a CoreOS cluster. Just run `fleetctl start docker-gc.service`.

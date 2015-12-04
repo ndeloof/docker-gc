@@ -1,0 +1,17 @@
+[Unit]
+Description=Docker-gc Service
+After=docker.service
+Requires=docker.service
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/docker kill docker-gc
+ExecStartPre=-/usr/bin/docker rm docker-gc
+ExecStartPre=/usr/bin/docker pull ndeloof/docker-gc:latest
+ExecStart=/usr/bin/docker run -v /var/run/docker.sock:/var/run/docker.sock --name=docker-gc ndeloof/docker-gc
+ExecStop=/usr/bin/docker stop -t 2 docker-gc
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Global=true
