@@ -3,7 +3,7 @@ GOOS=linux
 GOARCH=amd64
 COMMIT=`git rev-parse --short HEAD`
 APP=docker-gc
-REPO?=ggtools/$(APP)
+REPO?=ndeloof/$(APP)
 TAG?=latest
 
 all: image
