@@ -17,17 +17,16 @@ package main
 
 import (
 	"github.com/fsouza/go-dockerclient"
-	"fmt"
-	"log"
+	log "github.com/Sirupsen/logrus"
 	"time"
 	"flag"
 )
 
 var client *docker.Client
-var maxAge = flag.Duration("maxAge", 72*time.Hour, "max duration for an unused image")
+var maxAge = flag.Duration("maxAge", 72 * time.Hour, "max duration for an unused image")
+var debug = flag.Bool("debug", false, "Enable debug output")
 
 func init() {
-
 	c, err := docker.NewClientFromEnv()
 	if err != nil {
 		log.Fatal("Failed to setup docker client " + err.Error())
@@ -39,7 +38,11 @@ func main() {
 
 	flag.Parse()
 
-	fmt.Printf("Will purge all images unused since last %v\n",maxAge)
+	if *debug {
+		log.SetLevel(log.DebugLevel)
+	}
+
+	log.Infof("Will purge all images unused since last %v", maxAge)
 
 	c := make(chan *docker.APIEvents)
 
@@ -51,7 +54,7 @@ func main() {
 		select {
 		case e := <-c:
 			if e.Status == "destroy" {
-				fmt.Printf("Container using %s has been destroyed\n", e.From)
+				log.Infof("Container using %s has been destroyed", e.From)
 
 				// resolve tag into image ID if required
 				image, err := client.InspectImage(e.From)
@@ -60,21 +63,21 @@ func main() {
 				}
 				lastuse[image.ID] = time.Now()
 			}
-		case <- ticker.C:
+		case <-ticker.C:
 			collect(lastuse)
 		}
 
 	}
 }
 
-func collect(lastUse map[string]time.Time) {
 
+func collect(lastUse map[string]time.Time) {
 	dangling, err := client.ListImages(docker.ListImagesOptions{Filter: "dangling=true" })
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, image := range dangling {
-		fmt.Printf("Remove dangling image %v\n", image.ID)
+		log.Infof("Remove dangling image %v\n", image.ID)
 		client.RemoveImage(image.ID)
 	}
 
@@ -88,7 +91,7 @@ func collect(lastUse map[string]time.Time) {
 	}
 
 	max := time.Now().Add(time.Duration(-1 * maxAge.Nanoseconds()))
-	fmt.Printf("Purging all images unused since %v\n", max.Truncate(time.Second))
+	log.Debugf("Purging all images unused since %v", max.Truncate(time.Second))
 	images, err := client.ListImages(docker.ListImagesOptions{})
 	if err != nil {
 		log.Fatal(err)
@@ -96,10 +99,9 @@ func collect(lastUse map[string]time.Time) {
 	for _, image := range images {
 		id := image.ID
 		if use, ok := lastUse[id]; ok && use.Before(max) && !inUse[id] {
-			fmt.Printf("  > Image %s hasn't been used since %v\n", id, use)
+			log.Infof("Image %s hasn't been used since %v", id, use)
 			client.RemoveImage(id)
 		}
 	}
-
 
 }
