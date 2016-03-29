@@ -16,7 +16,7 @@ build: build-docker
 build-app: docker-gc
 
 docker-gc: deps
-	@go build -v
+	@go build -v -a -tags netgo -ldflags '-w'
 
 build-docker:
 	@docker run --rm -v $(PWD):/usr/src/$(APP) -w /usr/src/$(APP) golang bash -c "make build-app"

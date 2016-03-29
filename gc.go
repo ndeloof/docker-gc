@@ -20,11 +20,25 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"time"
 	"flag"
+	"os"
+	"strings"
+	"path"
+	"github.com/boltdb/bolt"
 )
 
-var client *docker.Client
-var maxAge = flag.Duration("maxAge", 72 * time.Hour, "max duration for an unused image")
-var debug = flag.Bool("debug", false, "Enable debug output")
+var (
+	client *docker.Client
+	db *bolt.DB
+	dbPath = flag.String("db", "/var/db/docker-gc/state.db", "Location of the database file")
+	debug = flag.Bool("debug", false, "Enable debug output")
+	maxAge = flag.Duration("maxAge", 72 * time.Hour, "max duration for an unused image")
+	lastUse = map[string]time.Time{}
+	purgeFrequency = flag.Duration("purgeFrequency", 57 * time.Second, "How often the image purge will be run")
+)
+
+const (
+	BUCKET_IMAGE = "images"
+)
 
 func init() {
 	c, err := docker.NewClientFromEnv()
@@ -34,64 +48,216 @@ func init() {
 	client = c
 }
 
-func main() {
+func removeImage(id string) {
+	log.WithField("id", id).Info("Removing image")
+	err := client.RemoveImage(id)
+	if err != nil {
+		log.WithError(err).WithField("id", id).Error("Cannot remove image")
+		return
+	}
+	if db != nil {
+		db.Update(func(tx *bolt.Tx) error {
+			log.WithField("id", id).Debug("Removing image from database")
+			b := tx.Bucket([]byte(BUCKET_IMAGE))
+			err := b.Delete([]byte(id))
+			if err != nil {
+				log.WithError(err).WithField("id", id).Warn("Error while removing from database")
+				return err
+			}
+			return nil
+		})
+	}
+	delete(lastUse, id)
+}
 
+func updateImageLastUsage(id string, usage time.Time) {
+	if db != nil {
+		db.Update(func(tx *bolt.Tx) error {
+			log.WithFields(log.Fields{"id": id, "usage": usage}).
+			Debug("Updating database")
+			b := tx.Bucket([]byte(BUCKET_IMAGE))
+			encoded, err := usage.GobEncode()
+			if err != nil {
+				log.WithError(err).WithFields(log.Fields{"id": id, "usage": usage}).
+				Error("Cannot update image data")
+				return err
+			}
+			err = b.Put([]byte(id), encoded)
+			if err != nil {
+				log.WithError(err).WithFields(log.Fields{"id": id, "usage": usage}).
+				Error("Cannot update image data")
+				return err
+			}
+			return nil
+		})
+		// TODO what to do if db cannot be updated?
+	}
+
+	lastUse[id] = usage
+}
+
+func loadImageDataFromDocker() {
+	now := time.Now()
+	log.Info("Setting last use from containers")
+	containers, err := client.ListContainers(docker.ListContainersOptions{All: true})
+	if err != nil {
+		log.WithError(err).Warn("Cannot get list of containers, image last usage may be less accurate")
+	} else {
+		for _, container := range containers {
+			log.WithField("Container", container.ID).Debug("Reading container")
+			img, err := client.InspectImage(container.Image)
+			if err != nil {
+				log.WithError(err).WithField("Container", container.ID).
+				Warn("Cannot inspect image for container")
+				continue
+			}
+			var usage time.Time
+			if strings.HasPrefix(container.Status, "Exit") {
+				log.WithField("Container", container.ID).Debug("Container exited, adjusting image last usage")
+				details, err := client.InspectContainer(container.ID)
+				if err != nil {
+					log.WithField("Container", container.ID).
+					WithError(err).Warn("Cannot inspect container, skipping image update")
+					continue
+				}
+				usage = details.State.FinishedAt
+
+			} else {
+				usage = now
+			}
+			if old, ok := lastUse[img.ID]; !ok || old.Before(usage) {
+				updateImageLastUsage(img.ID, usage)
+			}
+		}
+	}
+
+	log.Info("Reading image data from Docker")
+	images, err := client.ListImages(docker.ListImagesOptions{})
+	if err != nil {
+		log.WithError(err).Warn("Cannot list images from Docker")
+		return
+	}
+	for _, image := range images {
+		log.WithField("ID", image.ID).Debug("Reading image")
+		if old, exists := lastUse[image.ID]; exists {
+			log.WithField("ID", image.ID).WithField("Usage", old).Debug("Not updating image")
+		} else {
+			log.WithField("ID", image.ID).WithField("Usage", now).Debug("Updating image")
+			updateImageLastUsage(image.ID, now)
+		}
+	}
+}
+
+func initDatabase() error {
+	dirname := path.Dir(*dbPath)
+
+	err := os.MkdirAll(dirname, 0700)
+
+	if err != nil {
+		log.WithError(err).WithField("Dir", dirname).Error("Cannot create db directory")
+		return err
+	}
+
+	db, err = bolt.Open(*dbPath, 0600, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.WithError(err).WithField("Path", *dbPath).Error("Cannot open database")
+		return err
+	}
+
+	db.Update(func(tx *bolt.Tx) error {
+		log.WithField("Bucket", BUCKET_IMAGE).Debug("Using bucket")
+		b, err := tx.CreateBucketIfNotExists([]byte(BUCKET_IMAGE))
+
+		if err != nil {
+			log.WithError(err).Error("Cannot get or create bucket", BUCKET_IMAGE, err.Error())
+			return err
+		}
+
+		c := b.Cursor()
+
+		for id, usage := c.First(); id != nil; id, usage = c.Next() {
+			// TODO do not restore data for image not longer existing & remove them from DB
+			var decoded time.Time
+			err := decoded.GobDecode(usage)
+			if err != nil {
+				log.WithError(err).WithField("Image", id).Warn("Cannot decode last usage")
+			}
+			log.WithFields(log.Fields{
+				"Image": string(id),
+				"Last use": decoded,
+			}).Debug("Retrieved image data")
+			lastUse[string(id)] = decoded
+		}
+		return nil
+	})
+	return nil
+}
+
+func prepare() {
+	err := initDatabase()
+	if err != nil {
+		log.WithError(err).Warn("Cannot init database, persistence disabled")
+		if db != nil {
+			db.Close()
+			db = nil
+		}
+	}
+	loadImageDataFromDocker()
+	log.Infof("Loaded %d images from Docker", len(lastUse))
+}
+
+func main() {
 	flag.Parse()
 
 	if *debug {
 		log.SetLevel(log.DebugLevel)
 	}
 
-	log.Infof("Will purge all images unused since last %v", maxAge)
+	prepare()
 
-	c := make(chan *docker.APIEvents)
+	log.WithField("MaxAge", maxAge).Info("Will purge all images unused")
 
-	lastuse := map[string]time.Time{}
-	ticker := time.NewTicker(time.Second * 10)
+	ticker := time.NewTicker(*purgeFrequency)
 
-	client.AddEventListener(c)
 	for {
 		select {
-		case e := <-c:
-			if e.Status == "destroy" {
-				log.Infof("Container using %s has been destroyed", e.From)
-
-				// resolve tag into image ID if required
-				image, err := client.InspectImage(e.From)
-				if err != nil {
-					log.Fatal(err)
-				}
-				lastuse[image.ID] = time.Now()
-			}
 		case <-ticker.C:
-			collect(lastuse)
+			collect()
 		}
 
 	}
 }
 
-
-func collect(lastUse map[string]time.Time) {
+func collect() {
 	dangling, err := client.ListImages(docker.ListImagesOptions{Filter: "dangling=true" })
 	if err != nil {
-		log.Fatal(err)
+		// TODO isn't Fatal a be too much
+		log.WithError(err).Fatal("Cannot get list of dangling images")
 	}
 	for _, image := range dangling {
-		log.Infof("Remove dangling image %v\n", image.ID)
-		client.RemoveImage(image.ID)
+		log.WithField("id", image.ID).Info("Remove dangling image")
+		removeImage(image.ID)
 	}
 
 	inUse := map[string]bool{}
 	containers, err := client.ListContainers(docker.ListContainersOptions{All:true})
 	if err != nil {
-		log.Fatal(err)
+		// TODO isn't Fatal a be too much
+		log.WithError(err).Fatal("Cannot get list of containers")
 	}
 	for _, container := range containers {
-		inUse[container.Image] = true
+		img, err := client.InspectImage(container.Image)
+		if err != nil {
+			log.WithError(err).WithField("Container", container.ID).
+			Warn("Cannot inspect image for container")
+			continue
+		}
+		log.WithFields(log.Fields{"image": img.ID, "container": container.ID}).Debug("Image is used by container")
+		inUse[img.ID] = true
 	}
 
 	max := time.Now().Add(time.Duration(-1 * maxAge.Nanoseconds()))
-	log.Debugf("Purging all images unused since %v", max.Truncate(time.Second))
+	log.WithField("Since", max.Truncate(time.Second)).Debug("Purging all unused image")
 	images, err := client.ListImages(docker.ListImagesOptions{})
 	if err != nil {
 		log.Fatal(err)
@@ -99,8 +265,8 @@ func collect(lastUse map[string]time.Time) {
 	for _, image := range images {
 		id := image.ID
 		if use, ok := lastUse[id]; ok && use.Before(max) && !inUse[id] {
-			log.Infof("Image %s hasn't been used since %v", id, use)
-			client.RemoveImage(id)
+			log.WithFields(log.Fields{"id":id, "use": use}).Info("Purging unused image")
+			removeImage(image.ID)
 		}
 	}
 
