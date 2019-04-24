@@ -1,5 +1,7 @@
 # Docker Garbage Collector
 
+[![Run Status](https://api.shippable.com/projects/5cc0162a1f6d1300072d519b/badge?branch=master)]()
+
 ![Logo](docker-GC.png)
 
 ## Introduction
