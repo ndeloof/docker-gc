@@ -26,3 +26,7 @@ For your convenience, docker-gc is also available as a docker image. You can run
 You need to bind mount `/var/run/docker.sock` from docker host so the docker-gc process can attach to the daemon to listen for event and inspect/remove images.
 
 You can also use `docker-gc.service` to deploy Docker-gc everywhere using [Fleet](https://coreos.com/fleet/docs/latest/) on a CoreOS cluster. Just run `fleetctl start docker-gc.service`.
+
+## Note
+
+once https://github.com/moby/moby/issues/4237 has been addressed, docker-gc could be significantly simplified.
